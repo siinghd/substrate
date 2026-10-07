@@ -1,0 +1,55 @@
+# /etc/substrate/noded.yaml -- see docs/CONFIGURATION.md for every key.
+mode: standalone
+
+node:
+  data_dir: /var/lib/substrate
+  # Advertised capacity. NOT probed: leaving this 0 tells the scheduler this
+  # node has no room.
+  mem_total_mib: 16384
+
+api:
+  listen: 127.0.0.1:8080   # put a TLS terminator in front; do not expose directly
+
+gateway:
+  enabled: true
+  listen: 127.0.0.1:8081
+  base_domain: run.example.dev
+  allow_process_tier_previews: false
+
+driver:
+  # gvisor for hosts without /dev/kvm; firecracker where you have it.
+  name: gvisor
+  runsc_bin: /usr/local/bin/runsc
+  gvisor_sock_dir: /run/substrate-gvisor/sock
+  gvisor_overlay_size_mib: 2048
+  # Refuse to fall back to the no-boundary tier.
+  allow_process: false
+
+network:
+  enabled: true
+  # A /30 per sandbox: a block addresses a QUARTER of its size.
+  # /19 = 2046 sandboxes. Sizing this too small fails at allocation time.
+  node_block_cidr: 100.64.0.0/19
+  mtu: 1500
+  # Leave empty to use the default route's interface.
+  uplink_interface: ""
+
+limits:
+  max_mem_mib: 16384
+  max_vcpus: 16
+  max_ttl_absolute_secs: 2592000
+  default_idle_pause_secs: 3600
+  max_sandboxes_per_project: 1000
+  max_sandboxes_per_user: 20
+
+backup:
+  enabled: true
+  # A DIFFERENT volume from node.data_dir. A backup on the disk that failed is
+  # not a backup.
+  dir: /var/backups/substrate
+  interval_mins: 60
+  keep: 48
+
+log:
+  level: info
+  json: true

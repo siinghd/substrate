@@ -1,0 +1,17 @@
+bin/
+target/
+node_modules/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+dist/
+.substrate/
+coverage/
+.env
+
+# local-only
+/shim
+.audit/

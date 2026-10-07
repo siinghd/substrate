@@ -1,0 +1,43 @@
+[Unit]
+Description=Substrate node agent
+Documentation=https://github.com/substrate-sh/substrate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root is REQUIRED for a real isolation tier: creating network namespaces,
+# programming nftables, and running runsc all need it. Running unprivileged
+# makes noded refuse to start with an error that says so, rather than silently
+# serving sandboxes with no network.
+User=root
+ExecStart=/usr/local/bin/noded --config /etc/substrate/noded.yaml
+
+# Secrets come from the environment, never the config file, so a world-readable
+# config cannot leak them. 0600, owned by root.
+EnvironmentFile=/etc/substrate/noded.env
+
+Restart=always
+RestartSec=2s
+# Sandboxes hold real work; give the agent time to stop them cleanly rather
+# than being killed mid-teardown and orphaning namespaces and containers.
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+# Hardening. Deliberately conservative: this process legitimately needs broad
+# privilege to build sandboxes, so the value here is in what it CANNOT do.
+NoNewPrivileges=false
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectControlGroups=false
+PrivateTmp=false
+RestrictSUIDSGID=true
+RemoveIPC=true
+
+# Sandboxes are file-descriptor heavy: one agent socket plus pipes per exec,
+# across thousands of sandboxes.
+LimitNOFILE=1048576
+LimitNPROC=infinity
+
+[Install]
+WantedBy=multi-user.target

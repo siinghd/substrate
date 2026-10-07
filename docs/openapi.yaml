@@ -1,0 +1,367 @@
+openapi: 3.1.0
+info:
+  title: Substrate API
+  version: "1.0"
+  description: |
+    Multi-tenant micro-VM sandbox platform. REST/JSON with SSE for streams.
+    Every mutating request from an API-key principal requires an Idempotency-Key
+    header; replays within 24h return the original response (exec replay returns
+    the same exec handle). Sandbox-scoped JWTs authenticate end-user agents;
+    their audience is exactly one sandbox_id.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Org/project API key (sk_/pk_) or sandbox-scoped JWT"
+  schemas:
+    Error:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }
+        fix: { type: string, description: "Actionable hint per the tool-writing guidance" }
+    Sandbox:
+      type: object
+      properties:
+        id: { type: string, example: sb_476f8zandmyta9h3z7m2a }
+        template_id: { type: string }
+        external_user_id: { type: string }
+        state:
+          type: string
+          enum: [creating, running, paused, archived, destroying, destroyed, error]
+        isolation:
+          type: string
+          enum: [hv, kernel, process]
+          description: "Never silently downgraded (plan §2.4)"
+        mem_mib: { type: integer }
+        vcpus: { type: integer }
+        ttl_idle_secs: { type: integer }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        error: { type: string }
+    Exec:
+      type: object
+      properties:
+        id: { type: string }
+        sandbox_id: { type: string }
+        argv: { type: array, items: { type: string } }
+        state: { type: string, enum: [running, exited, killed, error] }
+        exit_code: { type: integer }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+paths:
+  /healthz:
+    get:
+      security: []
+      responses: { "200": { description: OK } }
+  /v1/sandboxes:
+    post:
+      summary: Create a sandbox (waits for running up to 10s, else 202)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                template_id: { type: string }
+                template_name: { type: string }
+                project_id: { type: string }
+                external_user_id: { type: string }
+                env: { type: object, additionalProperties: { type: string } }
+                mem_mib:
+                  type: integer
+                  minimum: 0
+                  description: >-
+                    0 or omitted uses the template's value. The upper bound is
+                    the operator's limits.max_mem_mib (default 16384); exceeding
+                    it is a 400 naming the field. Negative is rejected.
+                vcpus:
+                  type: integer
+                  minimum: 0
+                  description: >-
+                    0 or omitted uses the template's value. Bounded by
+                    limits.max_vcpus (default 16).
+                ttl_idle_secs:
+                  type: integer
+                  minimum: 0
+                  description: >-
+                    Pause after this much inactivity. 0 or omitted takes the
+                    operator's limits.default_idle_pause_secs -- it does NOT
+                    disable reclaim. Bounded by limits.max_ttl_absolute_secs.
+                ttl_absolute_secs:
+                  type: integer
+                  minimum: 0
+                  description: >-
+                    Destroy this long after creation, enforced even while
+                    paused. 0 means no absolute deadline. Bounded by
+                    limits.max_ttl_absolute_secs (default 2592000 = 30 days).
+      responses:
+        "201": { description: Running, content: { application/json: { schema: { $ref: "#/components/schemas/Sandbox" } } } }
+        "202": { description: Still starting, content: { application/json: { schema: { $ref: "#/components/schemas/Sandbox" } } } }
+        "400":
+          description: >-
+            Invalid request. Includes resource-limit rejections, where `message`
+            names the offending field and its ceiling and `fix` names the
+            operator key that raises it. Also returned when a request omits a
+            required Idempotency-Key.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "402": { description: Quota exceeded }
+    get:
+      summary: List sandboxes (project/org scoped by credential)
+      parameters:
+        - { name: external_user_id, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 100 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sandboxes: { type: array, items: { $ref: "#/components/schemas/Sandbox" } }
+  /v1/sandboxes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxID"
+    get:
+      summary: Get sandbox state
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Sandbox" } } } }
+        "404": { description: Not found }
+    delete:
+      summary: Destroy a sandbox
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202": { description: Destroying }
+  /v1/sandboxes/{id}/exec:
+    post:
+      summary: Start a process; returns immediately with an exec handle
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [argv]
+              properties:
+                argv: { type: array, items: { type: string }, minItems: 1 }
+                cwd: { type: string }
+                env: { type: object, additionalProperties: { type: string } }
+                tty: { type: boolean }
+      responses:
+        "201":
+          description: Started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { exec_id: { type: string } }
+  /v1/sandboxes/{id}/ports/{port}:
+    delete:
+      summary: Close a previously exposed port
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - name: port
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: Closed }
+  /v1/execs/{id}:
+    get:
+      summary: Poll exec status/exit code
+      parameters: [{ $ref: "#/components/parameters/ExecID" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Exec" } } } }
+    delete:
+      summary: Kill the exec (SIGKILL)
+      parameters: [{ $ref: "#/components/parameters/ExecID" }]
+      responses: { "202": { description: Killing } }
+  /v1/execs/{id}/stream:
+    get:
+      summary: SSE stream of stdout/stderr/exit; resumable via ?offset=N
+      parameters:
+        - $ref: "#/components/parameters/ExecID"
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: text/event-stream with events output|exit|timeout
+          content:
+            text/event-stream: {}
+  /v1/execs/{id}/stdin:
+    post:
+      summary: Write raw bytes to the exec's stdin
+      parameters: [{ $ref: "#/components/parameters/ExecID" }]
+      requestBody: { content: { application/octet-stream: {} } }
+      responses: { "200": { description: Written } }
+  /v1/sandboxes/{id}/fs/{path}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxID"
+      - name: path
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Read file bytes (?offset=&length=) or list dir (?list=true)
+      responses:
+        "200": { description: File bytes or listing JSON }
+        "404": { description: Missing; error names the parent's contents where known }
+    put:
+      summary: Write file (parents auto-created); ?append=true appends
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { content: { application/octet-stream: {} } }
+      responses: { "201": { description: Written } }
+    delete:
+      summary: Remove file or directory tree
+      responses: { "200": { description: Deleted } }
+  /v1/sandboxes/{id}/ports:
+    post:
+      summary: Expose a port; returns preview URL (+token unless public)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [port]
+              properties:
+                port: { type: integer }
+                public: { type: boolean, default: false }
+      responses:
+        "201":
+          description: Exposed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  port: { type: integer }
+                  url: { type: string }
+                  public: { type: boolean }
+                  token: { type: string }
+  /v1/sandboxes/{id}/pause:
+    post:
+      summary: Snapshot memory+disk to storage; frees all RAM (scale-to-zero)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": { description: Paused }
+        "409": { description: Tier cannot pause }
+  /v1/sandboxes/{id}/resume:
+    post:
+      summary: Resume a paused sandbox (implicit on most other calls)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses: { "200": { description: Resumed } }
+  /v1/sandboxes/{id}/snapshots:
+    post:
+      summary: Point-in-time snapshot (lineage-tracked; user-touched snapshots stay private to one lineage)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Snapshotted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  kind: { type: string }
+                  lineage: { type: string }
+  /v1/sandboxes/{id}/tokens:
+    post:
+      summary: Mint a sandbox-scoped JWT (audience = this sandbox; no destroy scope)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scopes: { type: array, items: { type: string, enum: [exec, fs, ports] } }
+                ttl_secs: { type: integer, default: 86400 }
+      responses:
+        "201":
+          description: Minted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  scopes: { type: array, items: { type: string } }
+                  expires_at: { type: string, format: date-time }
+  /v1/templates:
+    get:
+      summary: List templates
+      responses: { "200": { description: OK } }
+    post:
+      summary: Register a template
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "201": { description: Created } }
+  /v1/events:
+    get:
+      summary: Lifecycle event feed (the metering ledger)
+      parameters:
+        - { name: sandbox_id, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: after, in: query, schema: { type: integer, description: unix millis } }
+      responses: { "200": { description: OK } }
+  /v1/usage:
+    get:
+      summary: Usage rollups grouped for customer-side billing
+      parameters:
+        - { name: group_by, in: query, schema: { type: string, enum: [external_user_id, project_id, sandbox_id] } }
+        - { name: from, in: query, schema: { type: integer } }
+        - { name: to, in: query, schema: { type: integer } }
+      responses: { "200": { description: OK } }
+  /v1/nodes:
+    get:
+      summary: Cell mode — list registered nodes
+      responses: { "200": { description: OK } }
+  /v1/node/enroll:
+    post:
+      summary: Node plane — enroll with a one-time token (nodes dial out; §5.3)
+      security: []
+      responses: { "201": { description: Enrolled }, "401": { description: Bad enrollment token } }
+  /v1/node/heartbeat:
+    post:
+      summary: Node plane — capacity heartbeat
+      security: []
+      responses: { "204": { description: OK } }
+parameters:
+  SandboxID:
+    name: id
+    in: path
+    required: true
+    schema: { type: string }
+  ExecID:
+    name: id
+    in: path
+    required: true
+    schema: { type: string }
+  IdempotencyKey:
+    name: Idempotency-Key
+    in: header
+    schema: { type: string }
+    required: false
+    description: Required for mutations by API-key principals; 24h dedupe window

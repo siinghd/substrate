@@ -1,0 +1,11 @@
+{
+  "name": "@substrate-sh/sdk",
+  "version": "1.0.0",
+  "description": "Substrate sandbox SDK — create, exec, and manage micro-VM sandboxes",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test/test.mjs"
+  },
+  "license": "Apache-2.0"
+}
